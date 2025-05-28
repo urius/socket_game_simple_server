@@ -13,16 +13,16 @@ io.on('connection', (socket) => {
     const playerId = uuidv4();
     
     // Send initial connection success with player ID
-    socket.emit("connectionSuccess", { playerId });
+    socket.emit("connectionSuccess", playerId);
 
-    socket.on('setPlayerName', ({ playerName }) => {
+    socket.on('setPlayerName', (playerName) => {
         // Store player name in socket data for later use
         socket.data.playerName = playerName;
         // Send confirmation back to client
-        socket.emit("playerNameSet", { 
+        socket.emit("playerNameSet", JSON.stringify({ 
             playerId,
             playerName
-        });
+        }));
     });
 
     socket.on('createRoom', () => {
@@ -33,19 +33,20 @@ io.on('connection', (socket) => {
                 id: playerId,
                 socketId: socket.id,
                 playerName: socket.data.playerName,
-                isConnected: true
+                isConnected: true,
+                isReady: false
             }]
         };
         
         _rooms.set(roomId, room);
         socket.join(roomId);
-        socket.emit("roomCreated", { roomId });
+        socket.emit("roomCreated", roomId);
     });
 
-    socket.on('connectToRoom', ({ roomId }) => {
+    socket.on('connectToRoom', (roomId) => {
         const room = _rooms.get(roomId);
         if (!room) {
-            socket.emit("error", { message: "Room not found" });
+            socket.emit("error", "Room not found");
             return;
         }
 
@@ -53,18 +54,49 @@ io.on('connection', (socket) => {
             id: playerId,
             socketId: socket.id,
             playerName: socket.data.playerName,
-            isConnected: true
+            isConnected: true,
+            isReady: false
         });
 
         socket.join(roomId);
-        io.to(roomId).emit("roomStateChanged", {
+        io.to(roomId).emit("roomStateChanged", JSON.stringify({
             roomId,
             players: room.players.map(p => ({
                 id: p.id,
                 playerName: p.playerName,
-                isConnected: p.isConnected
+                isConnected: p.isConnected,
+                isReady: p.isReady
             }))
-        });
+        }));
+    });
+
+    socket.on('setReady', (data) => {
+        const { roomId, playerId, isReady } = JSON.parse(data);
+        
+        const room = _rooms.get(roomId);
+        if (!room) {
+            socket.emit("error", "Room not found");
+            return;
+        }
+
+        const player = room.players.find(p => p.id === playerId);
+        if (!player) {
+            socket.emit("error", "Player not found in room");
+            return;
+        }
+
+        player.isReady = isReady;
+        
+        // Notify all players in the room about the state change
+        io.to(roomId).emit("roomStateChanged", JSON.stringify({
+            roomId,
+            players: room.players.map(p => ({
+                id: p.id,
+                playerName: p.playerName,
+                isConnected: p.isConnected,
+                isReady: p.isReady
+            }))
+        }));
     });
 
     socket.on('disconnect', () => {
@@ -75,15 +107,24 @@ io.on('connection', (socket) => {
                 player.isConnected = false;
                 player.socketId = null;
                 
-                // Notify other players about the disconnection
-                io.to(roomId).emit("roomStateChanged", {
-                    roomId,
-                    players: room.players.map(p => ({
-                        id: p.id,
-                        playerName: p.playerName,
-                        isConnected: p.isConnected
-                    }))
-                });
+                // Check if this was the last connected player
+                const connectedPlayers = room.players.filter(p => p.isConnected);
+                if (connectedPlayers.length === 0) {
+                    // Remove the room if no players are connected
+                    _rooms.delete(roomId);
+                    console.log(`Room ${roomId} removed - no connected players`);
+                } else {
+                    // Notify remaining players about the disconnection
+                    io.to(roomId).emit("roomStateChanged", JSON.stringify({
+                        roomId,
+                        players: room.players.map(p => ({
+                            id: p.id,
+                            playerName: p.playerName,
+                            isConnected: p.isConnected,
+                            isReady: p.isReady
+                        }))
+                    }));
+                }
             }
         });
     });
