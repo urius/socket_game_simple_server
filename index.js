@@ -5,6 +5,8 @@ const io = new Server({ /* options */ });
 
 // Store rooms and their data
 const _rooms = new Map();
+// Store roomId by socketId
+const _socketToRoom = new Map();
 
 console.log("starting...");
 
@@ -34,11 +36,13 @@ io.on('connection', (socket) => {
                 socketId: socket.id,
                 playerName: socket.data.playerName,
                 isConnected: true,
-                isReady: false
+                isReady: false,
+                connectionIndex: 0
             }]
         };
         
         _rooms.set(roomId, room);
+        _socketToRoom.set(socket.id, roomId);
         socket.join(roomId);
         socket.emit("roomCreated", roomId);
     });
@@ -50,14 +54,19 @@ io.on('connection', (socket) => {
             return;
         }
 
+        // Calculate next connection index
+        const nextConnectionIndex = room.players.length;
+
         room.players.push({
             id: playerId,
             socketId: socket.id,
             playerName: socket.data.playerName,
             isConnected: true,
-            isReady: false
+            isReady: false,
+            connectionIndex: nextConnectionIndex
         });
 
+        _socketToRoom.set(socket.id, roomId);
         socket.join(roomId);
         io.to(roomId).emit("roomStateChanged", JSON.stringify({
             roomId,
@@ -65,8 +74,37 @@ io.on('connection', (socket) => {
                 id: p.id,
                 playerName: p.playerName,
                 isConnected: p.isConnected,
-                isReady: p.isReady
+                isReady: p.isReady,
+                connectionIndex: p.connectionIndex
             }))
+        }));
+    });
+
+    socket.on('send', (message) => {
+        const roomId = _socketToRoom.get(socket.id);
+        if (!roomId) {
+            socket.emit("error", "Player not in any room");
+            return;
+        }
+
+        const room = _rooms.get(roomId);
+        if (!room) {
+            socket.emit("error", "Room not found");
+            return;
+        }
+
+        const player = room.players.find(p => p.socketId === socket.id);
+        if (!player) {
+            socket.emit("error", "Player not found in room");
+            return;
+        }
+
+        // Send message to all players in the room except sender
+        socket.to(roomId).emit("message", JSON.stringify({
+            roomId,
+            playerId,
+            playerName: player.playerName,
+            message
         }));
     });
 
@@ -94,39 +132,46 @@ io.on('connection', (socket) => {
                 id: p.id,
                 playerName: p.playerName,
                 isConnected: p.isConnected,
-                isReady: p.isReady
+                isReady: p.isReady,
+                connectionIndex: p.connectionIndex
             }))
         }));
     });
 
     socket.on('disconnect', () => {
-        // Update player connection status in all rooms
-        _rooms.forEach((room, roomId) => {
-            const player = room.players.find(p => p.socketId === socket.id);
-            if (player) {
-                player.isConnected = false;
-                player.socketId = null;
-                
-                // Check if this was the last connected player
-                const connectedPlayers = room.players.filter(p => p.isConnected);
-                if (connectedPlayers.length === 0) {
-                    // Remove the room if no players are connected
-                    _rooms.delete(roomId);
-                    console.log(`Room ${roomId} removed - no connected players`);
-                } else {
-                    // Notify remaining players about the disconnection
-                    io.to(roomId).emit("roomStateChanged", JSON.stringify({
-                        roomId,
-                        players: room.players.map(p => ({
-                            id: p.id,
-                            playerName: p.playerName,
-                            isConnected: p.isConnected,
-                            isReady: p.isReady
-                        }))
-                    }));
+        const roomId = _socketToRoom.get(socket.id);
+        if (roomId) {
+            _socketToRoom.delete(socket.id);
+            
+            const room = _rooms.get(roomId);
+            if (room) {
+                const player = room.players.find(p => p.socketId === socket.id);
+                if (player) {
+                    player.isConnected = false;
+                    player.socketId = null;
+                    
+                    // Check if this was the last connected player
+                    const connectedPlayers = room.players.filter(p => p.isConnected);
+                    if (connectedPlayers.length === 0) {
+                        // Remove the room if no players are connected
+                        _rooms.delete(roomId);
+                        console.log(`Room ${roomId} removed - no connected players`);
+                    } else {
+                        // Notify remaining players about the disconnection
+                        io.to(roomId).emit("roomStateChanged", JSON.stringify({
+                            roomId,
+                            players: room.players.map(p => ({
+                                id: p.id,
+                                playerName: p.playerName,
+                                isConnected: p.isConnected,
+                                isReady: p.isReady,
+                                connectionIndex: p.connectionIndex
+                            }))
+                        }));
+                    }
                 }
             }
-        });
+        }
     });
 });
 
